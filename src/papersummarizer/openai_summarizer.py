@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openai import OpenAI
 
@@ -23,6 +23,9 @@ from .prompts import (
     build_story_planner_prompt,
     get_five_layer_specs,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 LAYER_HEADER_PATTERN = re.compile(r"^\s*##\s*([1-5])\)")
 UNIT_TEMPERATURE_MODELS = ("kimi-k2.5",)
@@ -67,6 +70,7 @@ class OpenAISummarizer:
         layered_generation_enabled: bool = True,
         token_usage_enabled: bool = True,
         client: OpenAI | None = None,
+        progress_callback: Callable[[str, str], None] | None = None,
     ) -> None:
         self.model = model
         self.prompt_template = prompt_template
@@ -86,6 +90,7 @@ class OpenAISummarizer:
         self.client = client or OpenAI(
             api_key=api_key, base_url=base_url, timeout=timeout_sec
         )
+        self.progress_callback = progress_callback
 
     def summarize(self, paper_title: str, paper_text: str) -> str:
         return self.summarize_with_metrics(
@@ -104,6 +109,9 @@ class OpenAISummarizer:
         narrative_plan = ""
 
         if self.story_planning_enabled:
+            if self.progress_callback:
+                self.progress_callback("story_planning", "Generating narrative plan...")
+
             planner_prompt = build_story_planner_prompt(
                 template=self.story_planner_prompt_template,
                 paper_title=paper_title,
@@ -118,6 +126,10 @@ class OpenAISummarizer:
             if self.token_usage_enabled:
                 usage_steps.append(planner_usage)
 
+            if self.progress_callback:
+                total_tokens = planner_usage.total_tokens or 0
+                self.progress_callback("story_planning", f"✓ ({total_tokens} tokens)")
+
         draft_summary, draft_usage = self._build_draft_summary(
             paper_title=paper_title,
             paper_text=safe_text,
@@ -130,6 +142,9 @@ class OpenAISummarizer:
         if self.rewrite_enabled:
             review_feedback = ""
             if self.review_enabled:
+                if self.progress_callback:
+                    self.progress_callback("review", "Reviewing draft summary...")
+
                 review_prompt = build_review_prompt(
                     template=self.review_prompt_template,
                     paper_title=paper_title,
@@ -144,6 +159,13 @@ class OpenAISummarizer:
                 )
                 if self.token_usage_enabled:
                     usage_steps.append(review_usage)
+
+                if self.progress_callback:
+                    total_tokens = review_usage.total_tokens or 0
+                    self.progress_callback("review", f"✓ ({total_tokens} tokens)")
+
+            if self.progress_callback:
+                self.progress_callback("rewrite", "Rewriting final summary...")
 
             rewrite_prompt = build_rewrite_prompt(
                 template=self.rewrite_prompt_template,
@@ -160,6 +182,10 @@ class OpenAISummarizer:
             )
             if self.token_usage_enabled:
                 usage_steps.append(rewrite_usage)
+
+            if self.progress_callback:
+                total_tokens = rewrite_usage.total_tokens or 0
+                self.progress_callback("rewrite", f"✓ ({total_tokens} tokens)")
 
         usage = SummarizationTokenUsage(
             enabled=self.token_usage_enabled,
@@ -229,7 +255,14 @@ class OpenAISummarizer:
         layer_outputs: list[str] = []
         usage_steps: list[LLMCallUsage] = []
 
-        for layer_spec in get_five_layer_specs():
+        layer_specs = get_five_layer_specs()
+        for idx, layer_spec in enumerate(layer_specs, 1):
+            layer_key = f"layer_{idx}"
+            layer_name = layer_spec["title"]
+
+            if self.progress_callback:
+                self.progress_callback(layer_key, f"Generating {layer_name}...")
+
             user_prompt = build_layer_prompt(
                 template=self.prompt_template,
                 paper_title=paper_title,
@@ -255,6 +288,10 @@ class OpenAISummarizer:
                     layer_title=layer_spec["title"],
                 )
             )
+
+            if self.progress_callback:
+                total_tokens = layer_usage.total_tokens or 0
+                self.progress_callback(layer_key, f"✓ {layer_name} ({total_tokens} tokens)")
 
         return self._join_layers(layer_outputs), usage_steps
 

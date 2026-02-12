@@ -10,6 +10,7 @@ from .mineru_client import MinerUClient
 from .mineru_parser import MinerUPdfParser
 from .openai_summarizer import OpenAISummarizer
 from .pipeline import PaperSummarizationPipeline
+from .progress import RichProgressTracker, track_processing
 from .prompts import load_prompt_template
 
 
@@ -85,6 +86,12 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="Force disable token usage tracking",
     )
+    parser.add_argument(
+        "--no-rich",
+        action="store_true",
+        default=False,
+        help="Disable Rich progress display, use simple tqdm instead",
+    )
     return parser.parse_args()
 
 
@@ -119,63 +126,78 @@ def main() -> None:
     prompt_path = args.prompt_template or settings.prompt_template_path
     prompt_template = load_prompt_template(prompt_path)
 
-    mineru_client = MinerUClient(
-        base_url=settings.mineru_base_url,
-        api_token=settings.mineru_api_token,
-        timeout_sec=settings.mineru_timeout_sec,
-    )
-    parser = MinerUPdfParser(
-        client=mineru_client,
-        parse_options=settings.mineru_parse_options,
-        poll_interval_sec=settings.mineru_poll_interval_sec,
-        poll_timeout_sec=args.poll_timeout_sec,
-    )
-    summarizer = OpenAISummarizer(
-        api_key=settings.openai_api_key,
-        base_url=settings.openai_base_url,
-        model=model,
-        timeout_sec=settings.openai_timeout_sec,
-        prompt_template=prompt_template,
-        story_planning_enabled=settings.summary_story_planning_enabled,
-        review_enabled=settings.summary_review_enabled,
-        rewrite_enabled=settings.summary_rewrite_enabled,
-        layered_generation_enabled=layered_generation_enabled,
-        token_usage_enabled=token_usage_enabled,
-    )
+    # Initialize Rich progress tracker (if not disabled)
+    progress_tracker = None
+    if not args.no_rich:
+        try:
+            progress_tracker = RichProgressTracker()
+            progress_tracker.start()
+        except Exception:
+            # Fall back to no progress tracking if Rich fails
+            progress_tracker = None
 
-    pipeline = PaperSummarizationPipeline(
-        parser=parser,
-        summarizer=summarizer,
-        output_dir=output_dir,
-        summary_format=summary_format,
-    )
-
-    results = []
-    if input_path is not None:
-        results.extend(
-            pipeline.run(
-                input_path=input_path,
-                max_files=args.max_files,
-                skip_existing=not args.no_skip_existing,
-            )
+    try:
+        mineru_client = MinerUClient(
+            base_url=settings.mineru_base_url,
+            api_token=settings.mineru_api_token,
+            timeout_sec=settings.mineru_timeout_sec,
         )
-    if pdf_urls:
-        results.extend(
-            pipeline.run_urls(
-                pdf_urls=pdf_urls,
-                skip_existing=not args.no_skip_existing,
-            )
+        parser = MinerUPdfParser(
+            client=mineru_client,
+            parse_options=settings.mineru_parse_options,
+            poll_interval_sec=settings.mineru_poll_interval_sec,
+            poll_timeout_sec=args.poll_timeout_sec,
+        )
+        summarizer = OpenAISummarizer(
+            api_key=settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=model,
+            timeout_sec=settings.openai_timeout_sec,
+            prompt_template=prompt_template,
+            story_planning_enabled=settings.summary_story_planning_enabled,
+            review_enabled=settings.summary_review_enabled,
+            rewrite_enabled=settings.summary_rewrite_enabled,
+            layered_generation_enabled=layered_generation_enabled,
+            token_usage_enabled=token_usage_enabled,
         )
 
-    success_count = sum(1 for r in results if r.success)
-    fail_count = len(results) - success_count
+        pipeline = PaperSummarizationPipeline(
+            parser=parser,
+            summarizer=summarizer,
+            output_dir=output_dir,
+            summary_format=summary_format,
+            progress_tracker=progress_tracker,
+        )
 
-    print(f"Finished. total={len(results)} success={success_count} failed={fail_count}")
-    if fail_count:
-        print("Failed files:")
-        for result in results:
-            if not result.success:
-                print(f"- {result.pdf_path}: {result.error}")
+        results = []
+        if input_path is not None:
+            results.extend(
+                pipeline.run(
+                    input_path=input_path,
+                    max_files=args.max_files,
+                    skip_existing=not args.no_skip_existing,
+                )
+            )
+        if pdf_urls:
+            results.extend(
+                pipeline.run_urls(
+                    pdf_urls=pdf_urls,
+                    skip_existing=not args.no_skip_existing,
+                )
+            )
+
+        success_count = sum(1 for r in results if r.success)
+        fail_count = len(results) - success_count
+
+        print(f"Finished. total={len(results)} success={success_count} failed={fail_count}")
+        if fail_count:
+            print("Failed files:")
+            for result in results:
+                if not result.success:
+                    print(f"- {result.pdf_path}: {result.error}")
+    finally:
+        if progress_tracker:
+            progress_tracker.stop()
 
 
 if __name__ == "__main__":

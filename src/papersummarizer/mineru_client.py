@@ -132,11 +132,15 @@ class MinerUClient:
         task_id: str,
         poll_interval_sec: float,
         timeout_sec: int,
+        progress_callback: Callable[[int, str], None] | None = None,
     ) -> ExtractResultItem:
         """Poll one URL-based extraction task until terminal state."""
 
         start = time.monotonic()
+        attempt = 0
+
         while True:
+            attempt += 1
             data = self.get_extract_task(task_id)
             state = str(data.get("state") or "unknown").lower()
             result_url = (
@@ -152,11 +156,22 @@ class MinerUClient:
                 result_url=str(result_url) if result_url else None,
                 message=str(data.get("msg") or data.get("message") or "") or None,
             )
+
+            # Report progress via callback
+            if progress_callback:
+                elapsed = int(time.monotonic() - start)
+                progress_pct = 100 if item.state in _TERMINAL_STATES else min(90, attempt * 5)
+                progress_callback(
+                    progress_pct,
+                    f"Attempt {attempt} | State: {state} | {elapsed}s"
+                )
+
             if item.state in _TERMINAL_STATES:
                 return item
 
             if time.monotonic() - start > timeout_sec:
                 raise MinerUApiError(f"Timed out waiting for MinerU task: {task_id}")
+
             time.sleep(poll_interval_sec)
 
     def create_upload_batch(
@@ -272,12 +287,27 @@ class MinerUClient:
         batch_id: str,
         poll_interval_sec: float,
         timeout_sec: int,
+        progress_callback: Callable[[int, str], None] | None = None,
     ) -> list[ExtractResultItem]:
         """Poll batch endpoint until all files reach terminal states."""
 
         start = time.monotonic()
+        attempt = 0
+
         while True:
+            attempt += 1
             results = self.get_batch_results(batch_id)
+
+            # Report progress via callback
+            if progress_callback and results:
+                total = len(results)
+                done = sum(1 for r in results if r.state in _TERMINAL_STATES)
+                elapsed = int(time.monotonic() - start)
+                progress_callback(
+                    int(done / total * 100) if total > 0 else 0,
+                    f"Attempt {attempt} | {done}/{total} done | {elapsed}s"
+                )
+
             if results and all(result.state in _TERMINAL_STATES for result in results):
                 return results
 

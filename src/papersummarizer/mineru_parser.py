@@ -6,11 +6,14 @@ import json
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .exceptions import MinerUParseError
 from .mineru_client import MinerUClient
 from .models import ExtractResultItem, MinerUParseOptions, ParsedPaper, UploadFileSpec
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 class MinerUPdfParser:
@@ -22,11 +25,13 @@ class MinerUPdfParser:
         parse_options: MinerUParseOptions,
         poll_interval_sec: float = 2.0,
         poll_timeout_sec: int = 900,
+        progress_callback: Callable[[str, str], None] | None = None,
     ) -> None:
         self.client = client
         self.parse_options = parse_options
         self.poll_interval_sec = poll_interval_sec
         self.poll_timeout_sec = poll_timeout_sec
+        self.progress_callback = progress_callback
 
     def parse_pdf(self, pdf_path: Path, artifact_dir: Path) -> ParsedPaper:
         if not pdf_path.exists() or not pdf_path.is_file():
@@ -51,10 +56,15 @@ class MinerUPdfParser:
 
         self.client.upload_to_presigned_url(target.upload_url, pdf_path)
 
+        def _progress_wrapper(pct: int, details: str) -> None:
+            if self.progress_callback:
+                self.progress_callback("parsing", details)
+
         results = self.client.wait_for_batch(
             batch_id=batch.batch_id,
             poll_interval_sec=self.poll_interval_sec,
             timeout_sec=self.poll_timeout_sec,
+            progress_callback=_progress_wrapper,
         )
 
         result = None
@@ -78,10 +88,16 @@ class MinerUPdfParser:
             data_id=data_id,
             options=self.parse_options,
         )
+
+        def _progress_wrapper(pct: int, details: str) -> None:
+            if self.progress_callback:
+                self.progress_callback("parsing", details)
+
         result = self.client.wait_for_task(
             task_id=task_id,
             poll_interval_sec=self.poll_interval_sec,
             timeout_sec=self.poll_timeout_sec,
+            progress_callback=_progress_wrapper,
         )
 
         resolved_name = file_name or result.file_name or f"{data_id}.pdf"

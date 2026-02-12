@@ -6,6 +6,7 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 from tqdm import tqdm
@@ -15,6 +16,9 @@ from .mineru_parser import MinerUPdfParser
 from .models import PipelineResult
 from .openai_summarizer import OpenAISummarizer
 from .summary_evidence_enricher import SummaryEvidenceEnricher
+
+if TYPE_CHECKING:
+    from .progress import RichProgressTracker, StageUpdater
 
 SUMMARY_LAYER_HEADINGS = {
     "hook_tldr": "## 1) TL;DR",
@@ -142,12 +146,14 @@ class PaperSummarizationPipeline:
         output_dir: Path,
         evidence_enricher: SummaryEvidenceEnricher | None = None,
         summary_format: str = "five_layers_v1",
+        progress_tracker: "RichProgressTracker | None" = None,
     ) -> None:
         self.parser = parser
         self.summarizer = summarizer
         self.output_dir = output_dir
         self.evidence_enricher = evidence_enricher or SummaryEvidenceEnricher()
         self.summary_format = summary_format
+        self.progress_tracker = progress_tracker
 
     def run(
         self,
@@ -158,7 +164,7 @@ class PaperSummarizationPipeline:
         pdf_paths = discover_pdf_paths(input_path=input_path, max_files=max_files)
         results: list[PipelineResult] = []
 
-        for pdf_path in tqdm(pdf_paths, desc="Processing PDFs"):
+        for pdf_path in pdf_paths:
             result = self.process_one(
                 pdf_path=pdf_path,
                 input_root=input_path,
@@ -174,7 +180,7 @@ class PaperSummarizationPipeline:
         skip_existing: bool = True,
     ) -> list[PipelineResult]:
         results: list[PipelineResult] = []
-        for pdf_url in tqdm(pdf_urls, desc="Processing PDF URLs"):
+        for pdf_url in pdf_urls:
             result = self.process_one_url(
                 pdf_url=pdf_url,
                 skip_existing=skip_existing,
@@ -188,6 +194,30 @@ class PaperSummarizationPipeline:
         input_root: Path,
         skip_existing: bool,
     ) -> PipelineResult:
+        """Process a single PDF file with optional progress tracking."""
+        if self.progress_tracker:
+            from .progress import track_processing
+            with track_processing(pdf_path.name, self.progress_tracker) as stage:
+                return self._process_one_with_stage(
+                    pdf_path=pdf_path,
+                    input_root=input_root,
+                    skip_existing=skip_existing,
+                    stage=stage,
+                )
+        else:
+            return self._process_one_legacy(
+                pdf_path=pdf_path,
+                input_root=input_root,
+                skip_existing=skip_existing,
+            )
+
+    def _process_one_legacy(
+        self,
+        pdf_path: Path,
+        input_root: Path,
+        skip_existing: bool,
+    ) -> PipelineResult:
+        """Legacy processing without progress tracking."""
         parsed_path = build_output_path(
             pdf_path=pdf_path,
             input_root=input_root,
@@ -286,6 +316,236 @@ class PaperSummarizationPipeline:
                 error=None,
             )
         except Exception as exc:
+            error_metadata = {
+                "pdf_path": str(pdf_path),
+                "error": str(exc),
+                "failed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            metadata_path.write_text(
+                json.dumps(error_metadata, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            return PipelineResult(
+                pdf_path=pdf_path,
+                parsed_markdown_path=parsed_path if parsed_path.exists() else None,
+                summary_path=summary_path if summary_path.exists() else None,
+                success=False,
+                error=str(exc),
+            )
+
+    def _process_one_with_stage(
+        self,
+        pdf_path: Path,
+        input_root: Path,
+        skip_existing: bool,
+        stage: "StageUpdater",
+    ) -> PipelineResult:
+        """Process with Rich progress tracking."""
+        parsed_path = build_output_path(
+            pdf_path=pdf_path,
+            input_root=input_root,
+            output_root=self.output_dir,
+            category="parsed_markdown",
+            new_suffix=".md",
+        )
+        summary_path = build_output_path(
+            pdf_path=pdf_path,
+            input_root=input_root,
+            output_root=self.output_dir,
+            category="summaries",
+            new_suffix=".md",
+        )
+        metadata_path = build_output_path(
+            pdf_path=pdf_path,
+            input_root=input_root,
+            output_root=self.output_dir,
+            category="metadata",
+            new_suffix=".json",
+        )
+
+        if skip_existing and summary_path.exists():
+            return PipelineResult(
+                pdf_path=pdf_path,
+                parsed_markdown_path=parsed_path if parsed_path.exists() else None,
+                summary_path=summary_path,
+                success=True,
+                error=None,
+            )
+
+        try:
+            artifact_dir = build_artifact_dir(
+                pdf_path,
+                input_root=input_root,
+                output_root=self.output_dir,
+            )
+
+            # Step 1: MinerU Upload
+            file_size_kb = pdf_path.stat().st_size / 1024
+            stage.start("MinerU Upload", f"{file_size_kb:.1f} KB")
+            # Upload happens during parse_pdf, so we mark it complete after
+            # Note: actual upload is in parse_pdf, we'll update details there
+
+            # Step 2: MinerU Parsing
+            stage.start("MinerU Parsing", "Waiting for MinerU...")
+
+            # Create a progress callback for parsing
+            def _parse_progress(step: str, details: str) -> None:
+                if step == "parsing":
+                    stage.update_details("MinerU Parsing", details)
+
+            # Temporarily set the callback on parser
+            original_callback = getattr(self.parser, 'progress_callback', None)
+            self.parser.progress_callback = _parse_progress
+
+            try:
+                parsed_paper = self.parser.parse_pdf(
+                    pdf_path=pdf_path, artifact_dir=artifact_dir
+                )
+            finally:
+                self.parser.progress_callback = original_callback
+
+            stage.complete("MinerU Parsing", f"{len(parsed_paper.markdown_text):,} chars")
+            stage.complete("MinerU Upload", "✓")  # Complete upload stage too
+
+            parsed_path.write_text(parsed_paper.markdown_text, encoding="utf-8")
+
+            # Step 3: Extract metadata
+            paper_metadata = self._extract_paper_metadata(
+                paper_text=parsed_paper.markdown_text,
+                fallback_title=pdf_path.stem,
+            )
+
+            # Step 4: Story Planning
+            stage.start("Story Planning", "Generating narrative plan...")
+
+            # Step 5: Layer Generation (1-5)
+            layer_stages = [
+                "Layer 1/5 (TL;DR)",
+                "Layer 2/5 (Motivation)",
+                "Layer 3/5 (Method)",
+                "Layer 4/5 (Results)",
+                "Layer 5/5 (Insights)",
+            ]
+
+            def _layer_progress(layer_key: str, details: str) -> None:
+                # Map layer_key to stage name
+                layer_map = {
+                    "story_planning": "Story Planning",
+                    "layer_1": "Layer 1/5 (TL;DR)",
+                    "layer_2": "Layer 2/5 (Motivation)",
+                    "layer_3": "Layer 3/5 (Method)",
+                    "layer_4": "Layer 4/5 (Results)",
+                    "layer_5": "Layer 5/5 (Insights)",
+                    "review": "Review",
+                    "rewrite": "Final Rewrite",
+                }
+                stage_name = layer_map.get(layer_key)
+                if stage_name:
+                    if "✓" in details or "Generating" not in details:
+                        # Completed
+                        stage.complete(stage_name, details.replace("✓ ", ""))
+                    else:
+                        stage.start(stage_name, details.replace("Generating ", ""))
+
+            # Temporarily set callback on summarizer
+            original_summarizer_callback = getattr(self.summarizer, 'progress_callback', None)
+            self.summarizer.progress_callback = _layer_progress
+
+            try:
+                summary_text, summary_token_usage = self._summarize_with_optional_metrics(
+                    paper_title=paper_metadata["title"],
+                    paper_text=parsed_paper.markdown_text,
+                )
+            finally:
+                self.summarizer.progress_callback = original_summarizer_callback
+
+            # Mark any remaining layer stages as complete
+            for layer_stage in layer_stages:
+                # Check if already completed
+                file_idx = stage.file_idx
+                file_prog = self.progress_tracker.files[file_idx]
+                for s in file_prog.stages:
+                    if s.name == layer_stage and s.status != "completed":
+                        stage.complete(layer_stage)
+
+            # Step 6: Review (if enabled)
+            if hasattr(self.summarizer, 'review_enabled') and self.summarizer.review_enabled:
+                # Already handled by callback
+                pass
+            else:
+                stage.complete("Review", "Skipped")
+
+            # Step 7: Final Rewrite (if enabled)
+            if hasattr(self.summarizer, 'rewrite_enabled') and self.summarizer.rewrite_enabled:
+                # Already handled by callback
+                pass
+            else:
+                stage.complete("Final Rewrite", "Skipped")
+
+            # Update token usage in tracker
+            total_tokens = 0
+            if isinstance(summary_token_usage, dict):
+                total_tokens = summary_token_usage.get("aggregate", {}).get("total_tokens", 0)
+                # Estimate cost at $0.002 per 1K tokens (rough estimate)
+                estimated_cost = total_tokens * 0.002 / 1000
+                self.progress_tracker.update_token_usage(stage.file_idx, total_tokens, estimated_cost)
+
+            # Step 8: Enrich summary
+            summary_text, summary_evidence_coverage = (
+                self.evidence_enricher.enrich_summary(
+                    summary_text=summary_text,
+                    artifact_dir=artifact_dir,
+                    summary_path=summary_path,
+                )
+            )
+
+            # Step 9: Post-process and save
+            stage.start("Save Results", "Finalizing...")
+            summary_text = self._strip_internal_scaffolding(summary_text)
+            summary_text = self._inject_metadata_header(
+                summary_text=summary_text,
+                paper_metadata=paper_metadata,
+            )
+            summary_text = self._improve_readability(summary_text)
+            summary_path.write_text(summary_text, encoding="utf-8")
+            stage.complete("Save Results", f"{len(summary_text):,} chars")
+
+            summary_coverage = self._build_summary_coverage(summary_text=summary_text)
+            summary_style_coverage = self._build_summary_style_coverage(
+                summary_text=summary_text
+            )
+
+            metadata = {
+                "pdf_path": str(pdf_path),
+                "parsed_markdown_path": str(parsed_path),
+                "summary_path": str(summary_path),
+                "artifact_dir": str(artifact_dir),
+                "summary_format_version": self.summary_format,
+                "parsed_chars": len(parsed_paper.markdown_text),
+                "summary_chars": len(summary_text),
+                "summary_coverage": summary_coverage,
+                "summary_style_coverage": summary_style_coverage,
+                "summary_evidence_coverage": summary_evidence_coverage,
+                "summary_token_usage": summary_token_usage,
+                "paper_metadata": paper_metadata,
+                "processed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            metadata_path.write_text(
+                json.dumps(metadata, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            return PipelineResult(
+                pdf_path=pdf_path,
+                parsed_markdown_path=parsed_path,
+                summary_path=summary_path,
+                success=True,
+                error=None,
+            )
+        except Exception as exc:
+            # Mark current stage as failed
+            stage.fail("MinerU Parsing" if "MinerU" in str(exc) else "Final Rewrite", str(exc))
+
             error_metadata = {
                 "pdf_path": str(pdf_path),
                 "error": str(exc),
