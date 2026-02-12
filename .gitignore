@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+*.so
+
+# Environment & Secrets
+.env
+.env.local
+*.key
+*.secret
+
+# Outputs & Data
+outputs/
+*.pdf
+papers/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
