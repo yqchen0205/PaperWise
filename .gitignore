@@ -27,3 +27,6 @@ papers/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local Testing (won't affect open source version)
+../paperwise-test/
