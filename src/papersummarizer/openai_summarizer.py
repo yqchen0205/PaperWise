@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from openai import OpenAI
 
 from .exceptions import OpenAISummarizationError
@@ -69,6 +70,7 @@ class OpenAISummarizer:
         rewrite_system_prompt: str = DEFAULT_REWRITE_SYSTEM_PROMPT,
         layered_generation_enabled: bool = True,
         token_usage_enabled: bool = True,
+        trust_env: bool = False,
         client: OpenAI | None = None,
         progress_callback: Callable[[str, str], None] | None = None,
     ) -> None:
@@ -88,7 +90,13 @@ class OpenAISummarizer:
         self.layered_generation_enabled = layered_generation_enabled
         self.token_usage_enabled = token_usage_enabled
         self.client = client or OpenAI(
-            api_key=api_key, base_url=base_url, timeout=timeout_sec
+            api_key=api_key,
+            base_url=base_url,
+            timeout=timeout_sec,
+            http_client=httpx.Client(
+                timeout=timeout_sec,
+                trust_env=trust_env,
+            ),
         )
         self.progress_callback = progress_callback
 

@@ -40,11 +40,13 @@ class MinerUClient:
         timeout_sec: int = 60,
         post_qps_limit: int = 5,
         query_qps_limit: int = 20,
+        trust_env: bool = False,
         session: requests.Session | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_sec = timeout_sec
         self.session = session or requests.Session()
+        self.session.trust_env = trust_env
         self.session.headers.update(
             {
                 "Authorization": f"Bearer {api_token}",
@@ -242,12 +244,14 @@ class MinerUClient:
     def upload_to_presigned_url(self, upload_url: str, file_path: Path) -> None:
         """Upload a local file to the presigned storage URL."""
 
-        with file_path.open("rb") as fp:
-            response = requests.put(
-                upload_url,
-                data=fp,
-                timeout=self.timeout_sec,
-            )
+        with requests.Session() as upload_session:
+            upload_session.trust_env = self.session.trust_env
+            with file_path.open("rb") as fp:
+                response = upload_session.put(
+                    upload_url,
+                    data=fp,
+                    timeout=self.timeout_sec,
+                )
 
         if response.status_code >= 400:
             raise MinerUApiError(
@@ -320,7 +324,9 @@ class MinerUClient:
         """Download extraction archive from MinerU."""
 
         target_zip_path.parent.mkdir(parents=True, exist_ok=True)
-        response = requests.get(result_url, timeout=self.timeout_sec)
+        with requests.Session() as download_session:
+            download_session.trust_env = self.session.trust_env
+            response = download_session.get(result_url, timeout=self.timeout_sec)
         if response.status_code >= 400:
             raise MinerUApiError(
                 f"Failed to download result archive: HTTP {response.status_code}"

@@ -31,6 +31,8 @@ class Settings:
     summary_token_usage_enabled: bool
     summary_format: str
 
+    network_trust_env: bool
+
     output_dir: Path
     prompt_template_path: Path | None
 
@@ -134,6 +136,7 @@ def load_settings(dotenv_path: str | Path | None = None) -> Settings:
         ),
         summary_format=_read_env("SUMMARY_FORMAT", default="five_layers_v1")
         or "five_layers_v1",
+        network_trust_env=_read_bool("NETWORK_TRUST_ENV", default=False),
         output_dir=Path(
             _read_env("OUTPUT_DIR", default="outputs/runs/default")
             or "outputs/runs/default"

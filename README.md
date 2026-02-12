@@ -109,6 +109,7 @@ outputs/
 | `SUMMARY_REVIEW_ENABLED` | `true` | Enable coherence review stage |
 | `SUMMARY_REWRITE_ENABLED` | `true` | Enable final rewrite stage |
 | `SUMMARY_LAYERED_GENERATION_ENABLED` | `true` | Enable five-layer generation |
+| `NETWORK_TRUST_ENV` | `false` | Whether to inherit `HTTP_PROXY/HTTPS_PROXY/ALL_PROXY` from shell |
 
 ### MinerU Options
 

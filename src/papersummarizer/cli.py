@@ -141,6 +141,7 @@ def main() -> None:
             base_url=settings.mineru_base_url,
             api_token=settings.mineru_api_token,
             timeout_sec=settings.mineru_timeout_sec,
+            trust_env=settings.network_trust_env,
         )
         parser = MinerUPdfParser(
             client=mineru_client,
@@ -159,6 +160,7 @@ def main() -> None:
             rewrite_enabled=settings.summary_rewrite_enabled,
             layered_generation_enabled=layered_generation_enabled,
             token_usage_enabled=token_usage_enabled,
+            trust_env=settings.network_trust_env,
         )
 
         pipeline = PaperSummarizationPipeline(
